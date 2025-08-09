@@ -1,25 +1,26 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Maestro Player — Wet Plap Crescendo</title>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Maestro Player — Web Audio (with Seek & Download)</title>
 <style>
-  :root { --bg:#0b0b0f; --fg:#e8e8ee; --muted:#9aa0a6; --accent:#6ee7b7; --card:#14141a; }
-  html,body{background:var(--bg);color:var(--fg);font-family:-apple-system, system-ui, Segoe UI, Roboto, Arial, sans-serif;margin:0}
-  .wrap{max-width:820px;margin:24px auto;padding:0 16px}
+  :root { --bg:#0b0b0f; --fg:#e8e8ee; --muted:#9aa0a6; --accent:#60a5fa; --accent2:#22c55e; --card:#14141a; }
+  html,body{background:var(--bg);color:var(--fg);font-family:-apple-system,system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:0}
+  .wrap{max-width:860px;margin:24px auto;padding:0 16px}
   h1{font-size:22px;margin:12px 0 4px}
   p{color:var(--muted);margin:6px 0}
   .card{background:var(--card);border:1px solid #22232a;border-radius:14px;padding:14px;margin:12px 0}
   .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-  button,.btn{background:#111827;color:#f9fafb;border:1px solid #1f2937;border-radius:12px;padding:12px 16px;cursor:pointer}
+  button{background:#111827;color:#f9fafb;border:1px solid #1f2937;border-radius:12px;padding:10px 14px;cursor:pointer}
   button:disabled{opacity:.6;cursor:not-allowed}
-  input,textarea,select{background:#0f1117;color:var(--fg);border:1px solid #1f2230;border-radius:10px;padding:10px;width:100%}
+  input[type=range]{width:100%}
+  select,textarea{background:#0f1117;color:var(--fg);border:1px solid #1f2230;border-radius:10px;padding:10px;width:100%}
   .pill{padding:6px 10px;border-radius:999px;background:#1b1e27;color:#cbd5e1;border:1px solid #2a2f3b}
-  .accent{color:var(--accent)}
-  .mono{font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;font-size:12px}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
   .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
   @media (max-width:720px){.grid{grid-template-columns:1fr}}
+  .ok{background:#11321f;color:#c7f9cc}.bad{background:#3a1313;color:#fca5a5}
 </style>
 </head>
 <body>
@@ -30,11 +31,18 @@
   <div class="card">
     <div class="row">
       <button id="startBtn">Start</button>
+      <button id="pauseBtn" disabled>Pause</button>
+      <button id="resumeBtn" disabled>Resume</button>
       <button id="stopBtn" disabled>Stop</button>
       <span id="status" class="pill">Idle</span>
     </div>
-    <div class="row">
+
+    <div class="row" style="width:100%">
+      <input id="seek" type="range" min="0" max="900" step="1" value="0" />
+    </div>
+    <div class="row" style="justify-content:space-between;width:100%">
       <span id="clock">00:00 / 15:00</span>
+      <span id="seekHint" class="mono" style="color:#9aa0a6"></span>
     </div>
   </div>
 
@@ -54,7 +62,7 @@
 
   <div class="card">
     <h3 style="margin:0 0 8px">Import Custom Preset (JSON)</h3>
-    <p class="mono">Format: {"name":"My Preset","lengthSec":900,"stages":[[startSec,durationSec,[freqs...],pulseStartHz,pulseEndHz,[vols...]], ...]}</p>
+    <p class="mono">{"name":"My Preset","lengthSec":900,"stages":[[startSec,durationSec,[freqs...],pulseStartHz,pulseEndHz,[vols...]], ...]}</p>
     <textarea id="presetJson" rows="6" placeholder='Paste preset JSON here'></textarea>
     <div class="row" style="margin-top:8px">
       <button id="loadJson">Load JSON Preset</button>
@@ -62,24 +70,34 @@
   </div>
 
   <div class="card">
+    <h3 style="margin:0 0 8px">Export / Download</h3>
+    <div class="row">
+      <button id="recordBtn" disabled>Start Live Record</button>
+      <button id="saveBtn" disabled>Stop & Save</button>
+      <button id="offlineBtn">Quick Render (WAV)</button>
+    </div>
+    <p class="mono" id="dlInfo"></p>
+  </div>
+
+  <div class="card">
     <h3 style="margin:0 0 8px">What this does</h3>
     <ul>
       <li>Monaural sine oscillators layered at target resonances (38 / 74 / 18 / 120 Hz; then 20 Hz drop)</li>
       <li>Isochronic gate (sine→square waveshaper) ramping pulse per stage</li>
-      <li>Preprogrammed 5-stage crescendo totaling 15:00</li>
+      <li>Preprogrammed 5‑stage crescendo totaling 15:00</li>
+      <li><b>New:</b> Pause/Resume, Seek, and Download (Record or Quick Render)</li>
     </ul>
   </div>
 </div>
 
 <script>
 (() => {
-  // ======= Built-in presets =======
+  // ======= Preset(s) =======
   const PRESETS = [
     {
       name: "Wet Plap Crescendo (15:00)",
       lengthSec: 900,
       stages: [
-        // [startSec, durationSec, baseFreqs[], pulseStartHz, pulseEndHz, volumes[]]
         [   0, 180, [38],                 1.5, 2.0, [0.60] ],
         [ 180, 240, [38, 74],             2.0, 3.5, [0.75, 0.50] ],
         [ 420, 240, [38, 74, 18],         3.5, 5.0, [0.85, 0.50, 0.40] ],
@@ -91,187 +109,318 @@
 
   // ======= DOM =======
   const startBtn = document.getElementById('startBtn');
+  const pauseBtn = document.getElementById('pauseBtn');
+  const resumeBtn= document.getElementById('resumeBtn');
   const stopBtn  = document.getElementById('stopBtn');
   const statusEl = document.getElementById('status');
   const clockEl  = document.getElementById('clock');
+  const seekEl   = document.getElementById('seek');
+  const seekHint = document.getElementById('seekHint');
   const presetSel= document.getElementById('presetSelect');
-  const presetInfo = document.getElementById('presetInfo');
-  const presetJson = document.getElementById('presetJson');
-  const loadJsonBtn = document.getElementById('loadJson');
-  const masterVol = document.getElementById('masterVol');
+  const presetInfo=document.getElementById('presetInfo');
+  const presetJson=document.getElementById('presetJson');
+  const loadJsonBtn=document.getElementById('loadJson');
+  const masterVol= document.getElementById('masterVol');
+  const recordBtn= document.getElementById('recordBtn');
+  const saveBtn  = document.getElementById('saveBtn');
+  const offlineBtn=document.getElementById('offlineBtn');
+  const dlInfo   = document.getElementById('dlInfo');
 
-  let ctx, master, running=false, rafId=null, startPerf=0, activeNodes=[];
+  // ======= State =======
+  let ctx, master, running=false, paused=false;
+  let baseStartPerf=0, elapsedWhenPaused=0, rafId=null;
   let selectedPreset = PRESETS[0];
+  let activeStops=[];
+  let mediaRecorder=null, recordedChunks=[];
 
-  // Populate presets
-  function refreshPresetList() {
-    presetSel.innerHTML = "";
-    PRESETS.forEach((p, i) => {
-      const opt = document.createElement('option');
-      opt.value = i;
-      opt.textContent = p.name;
-      presetSel.appendChild(opt);
+  // ======= Helpers =======
+  const fmt = s => {
+    s = Math.max(0, s|0);
+    const m = (s/60)|0, r = s%60;
+    return `${m}:${r<10?'0'+r:r}`;
+  };
+  const setStatus = (msg, ok=true)=>{ statusEl.textContent=msg; statusEl.className='pill '+(ok?'ok':'bad'); };
+
+  function loadPresetList(){
+    presetSel.innerHTML='';
+    PRESETS.forEach((p,i)=>{
+      const opt=document.createElement('option'); opt.value=i; opt.textContent=p.name; presetSel.appendChild(opt);
     });
-    presetSel.value = PRESETS.indexOf(selectedPreset);
+    presetSel.value=PRESETS.indexOf(selectedPreset);
     presetInfo.textContent = `${selectedPreset.name} • ${Math.round(selectedPreset.lengthSec/60)} min`;
+    seekEl.max = selectedPreset.lengthSec;
   }
-  refreshPresetList();
+  loadPresetList();
 
-  presetSel.addEventListener('change', () => {
+  presetSel.addEventListener('change', ()=>{
     selectedPreset = PRESETS[parseInt(presetSel.value,10)];
     presetInfo.textContent = `${selectedPreset.name} • ${Math.round(selectedPreset.lengthSec/60)} min`;
+    seekEl.max = selectedPreset.lengthSec;
   });
 
-  loadJsonBtn.addEventListener('click', () => {
-    try {
+  loadJsonBtn.addEventListener('click', ()=>{
+    try{
       const obj = JSON.parse(presetJson.value.trim());
-      if (!obj || !obj.name || !obj.stages || !Array.isArray(obj.stages)) throw new Error("Invalid preset JSON.");
-      if (!obj.lengthSec) {
-        // Infer from last stage
-        let maxEnd = 0;
-        obj.stages.forEach(s => { maxEnd = Math.max(maxEnd, s[0]+s[1]); });
-        obj.lengthSec = maxEnd;
+      if (!obj || !obj.stages || !Array.isArray(obj.stages)) throw new Error('Invalid preset JSON');
+      if (!obj.lengthSec){
+        let maxEnd=0; obj.stages.forEach(s=>maxEnd=Math.max(maxEnd, s[0]+s[1])); obj.lengthSec=maxEnd;
       }
-      PRESETS.push(obj);
-      selectedPreset = obj;
-      refreshPresetList();
-      status("Loaded custom preset.", true);
-    } catch(e) {
-      status("Preset JSON error: " + e.message, false);
-    }
+      PRESETS.push(obj); selectedPreset=obj; loadPresetList(); setStatus('Loaded custom preset.');
+    }catch(e){ setStatus('Preset JSON error: '+e.message,false); }
   });
 
-  function status(msg, ok=true){
-    statusEl.textContent = msg;
-    statusEl.style.background = ok ? "#11321f" : "#3a1313";
-    statusEl.style.color = ok ? "#c7f9cc" : "#fca5a5";
-  }
-
-  function formatTime(sec){
-    const m = Math.floor(sec/60), s = Math.floor(sec%60);
-    return `${m}:${s<10?'0'+s:s}`;
-  }
-
-  function stopAll() {
-    running=false;
-    if (rafId) cancelAnimationFrame(rafId);
-    try { if (activeNodes) activeNodes.forEach(n => n.stop && n.stop(ctx.currentTime+0.01)); } catch(e){}
-    activeNodes=[];
-    try { if (ctx && ctx.state!=="closed") ctx.close(); } catch(e){}
-    startBtn.disabled=false; stopBtn.disabled=true;
-    status("Stopped.", true);
+  // ======= Audio graph builders =======
+  function makeSquareShaper(){
+    const shaper = ctx.createWaveShaper();
+    const curve = new Float32Array(256);
+    for (let i=0;i<256;i++){ const x=(i/255)*2-1; curve[i]=(x>=0?1:-1); }
+    shaper.curve=curve; shaper.oversample='4x';
+    return shaper;
   }
 
   function makeIsoGate(pStart, pEnd, t0, dur){
     const lfo = ctx.createOscillator();
-    const shaper = ctx.createWaveShaper();
+    const shaper = makeSquareShaper();
     const lfoGain = ctx.createGain();
     const bias = ctx.createConstantSource();
     const gate = ctx.createGain();
 
-    // waveshaper to approximate square
-    const curve = new Float32Array(256);
-    for (let i=0;i<256;i++){ const x=(i/255)*2-1; curve[i]=(x>=0?1:-1); }
-    shaper.curve = curve; shaper.oversample = '4x';
-
     lfo.type='sine';
-    lfo.connect(shaper);
-    shaper.connect(lfoGain);
-    lfoGain.gain.value = 0.5;
-
-    bias.offset.value = 0.5;
-    lfoGain.connect(gate.gain);
-    bias.connect(gate.gain);
+    lfo.connect(shaper); shaper.connect(lfoGain);
+    lfoGain.gain.value=0.5; bias.offset.value=0.5;
+    lfoGain.connect(gate.gain); bias.connect(gate.gain);
 
     lfo.frequency.setValueAtTime(pStart, t0);
     lfo.frequency.linearRampToValueAtTime(pEnd, t0+dur);
-
     lfo.start(t0); bias.start(t0);
 
-    return {
-      node: gate,
-      stop: (t)=>{ try{lfo.stop(t);}catch(e){} try{bias.stop(t);}catch(e){} }
-    };
+    return { node:gate, stop:(t)=>{ try{lfo.stop(t);}catch(_){} try{bias.stop(t);}catch(_){} } };
   }
 
-  function scheduleStage(stage){
-    const [startSec, durSec, freqs, pStart, pEnd, vols] = stage;
-    const t0 = ctx.currentTime + startSec + 0.05;
+  function scheduleFromOffset(offsetSec){
+    // Clear any previous
+    activeStops.forEach(fn=>{ try{fn(ctx.currentTime+0.01);}catch(_){} }); activeStops=[];
+    if (master) try{ master.disconnect(); }catch(_){}
+    master = ctx.createGain(); master.gain.value=parseFloat(masterVol.value||"0.9"); master.connect(ctx.destination);
 
-    const gateObj = makeIsoGate(pStart, pEnd, t0, durSec);
-    const stageMaster = ctx.createGain();
-    stageMaster.gain.setValueAtTime(1.0, t0);
-    gateObj.node.connect(stageMaster).connect(master);
+    const T = selectedPreset.lengthSec;
+    const startAt = ctx.currentTime + 0.05;
+    const rel = (s)=>startAt + Math.max(0, s - offsetSec);
 
-    freqs.forEach((f, idx) => {
-      const osc = ctx.createOscillator();
-      const g = ctx.createGain();
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(f, t0);
-      g.gain.setValueAtTime((vols && vols[idx] != null) ? vols[idx] : 0.5, t0);
-      osc.connect(g).connect(gateObj.node);
-      osc.start(t0);
-      osc.stop(t0 + durSec + 0.02);
-      activeNodes.push({stop:(t)=>{try{osc.stop(t);}catch(e){}}});
-    });
+    selectedPreset.stages.forEach(stage=>{
+      const [s, dur, freqs, p0, p1, vols] = stage;
+      const stageEnd = s + dur;
+      if (stageEnd <= offsetSec) return; // entirely before offset
 
-    // fade out final stage last 15s
-    if (startSec + durSec >= selectedPreset.lengthSec && startSec <= selectedPreset.lengthSec-15) {
-      const fadeStart = t0 + durSec - 15;
-      stageMaster.gain.linearRampToValueAtTime(stageMaster.gain.value, fadeStart);
-      stageMaster.gain.linearRampToValueAtTime(0.0001, t0 + durSec);
-    }
+      const segStart = Math.max(s, offsetSec);
+      const segDur = stageEnd - segStart;
+      const pStart = p0 + (p1 - p0) * ((segStart - s)/dur);
+      const pEnd   = p0 + (p1 - p0) * ((segStart - s + segDur)/dur);
 
-    activeNodes.push({stop: gateObj.stop});
-  }
+      const gateObj = makeIsoGate(pStart, pEnd, rel(segStart), segDur);
+      const stageMaster = ctx.createGain();
+      gateObj.node.connect(stageMaster).connect(master);
 
-  async function start() {
-    if (running) return;
-    running = true;
-    startBtn.disabled = true; stopBtn.disabled = false;
+      freqs.forEach((f, idx)=>{
+        const osc = ctx.createOscillator(); const g=ctx.createGain();
+        osc.type='sine'; osc.frequency.setValueAtTime(f, rel(segStart));
+        g.gain.setValueAtTime((vols && vols[idx]!=null)?vols[idx]:0.5, rel(segStart));
+        osc.connect(g).connect(gateObj.node);
+        osc.start(rel(segStart)); osc.stop(rel(segStart)+segDur+0.02);
+        activeStops.push((t)=>{ try{osc.stop(t);}catch(_){}}); 
+      });
 
-    try {
-      ctx = new (window.AudioContext || window.webkitAudioContext)({latencyHint:"interactive"});
-      if (ctx.state === 'suspended') await ctx.resume();
-    } catch(e) {
-      status("AudioContext failed: " + e, false);
-      startBtn.disabled=false; stopBtn.disabled=true; running=false;
-      return;
-    }
-
-    master = ctx.createGain();
-    master.gain.value = parseFloat(masterVol.value || "0.9");
-    master.connect(ctx.destination);
-
-    // schedule all stages
-    selectedPreset.stages.forEach(scheduleStage);
-    status("Playing…", true);
-
-    // timer
-    const totalMs = selectedPreset.lengthSec * 1000;
-    startPerf = performance.now();
-    const tick = () => {
-      if (!running) return;
-      const elapsed = performance.now() - startPerf;
-      const remain = Math.max(0, totalMs - elapsed);
-      clockEl.textContent = `${formatTime(elapsed/1000)} / ${formatTime(selectedPreset.lengthSec)}`
-      if (remain <= 0) {
-        stopAll();
-        status("Done • " + formatTime(selectedPreset.lengthSec), true);
-      } else {
-        rafId = requestAnimationFrame(tick);
+      // fadeout if we include final stage
+      if (stageEnd >= T && segStart <= T-15) {
+        const fadeStart = rel(segStart) + segDur - 15;
+        stageMaster.gain.linearRampToValueAtTime(stageMaster.gain.value, fadeStart);
+        stageMaster.gain.linearRampToValueAtTime(0.0001, rel(segStart)+segDur);
       }
-    };
+
+      activeStops.push(gateObj.stop);
+    });
+  }
+
+  // ======= Transport =======
+  function nowElapsed(){
+    if (!running) return 0;
+    const base = paused ? elapsedWhenPaused*1000 : (performance.now() - baseStartPerf) + elapsedWhenPaused*1000;
+    return Math.min(selectedPreset.lengthSec, Math.floor(base/1000));
+  }
+
+  function startAt(offset=0){
+    running=true; paused=false; startBtn.disabled=true; stopBtn.disabled=false; pauseBtn.disabled=false; resumeBtn.disabled=true;
+    setStatus('Playing…');
+    if (!ctx) ctx = new (window.AudioContext||window.webkitAudioContext)({latencyHint:'interactive'});
+    scheduleFromOffset(offset);
+    baseStartPerf = performance.now();
+    elapsedWhenPaused = offset;
+
+    // enable record button
+    recordBtn.disabled = !('MediaRecorder' in window);
+
+    tick();
+  }
+
+  function pause(){
+    if (!running || paused) return;
+    paused=true; pauseBtn.disabled=true; resumeBtn.disabled=false;
+    elapsedWhenPaused = nowElapsed();
+    activeStops.forEach(fn=>{ try{fn(ctx.currentTime+0.01);}catch(_){}}); activeStops=[];
+    setStatus('Paused');
+  }
+
+  function resume(){
+    if (!running || !paused) return;
+    startAt(elapsedWhenPaused);
+  }
+
+  function stopAll(){
+    running=false; paused=false;
+    if (rafId) cancelAnimationFrame(rafId);
+    activeStops.forEach(fn=>{ try{fn(ctx.currentTime+0.01);}catch(_){}}); activeStops=[];
+    if (ctx && ctx.state!=='closed'){ try{ctx.close();}catch(_){}} ctx=null;
+    startBtn.disabled=false; stopBtn.disabled=true; pauseBtn.disabled=true; resumeBtn.disabled=true;
+    recordBtn.disabled=true; saveBtn.disabled=true;
+    setStatus('Stopped.');
+    seekEl.value=0; clockEl.textContent=`00:00 / ${fmt(selectedPreset.lengthSec)}`;
+  }
+
+  function tick(){
+    if (!running) return;
+    const el = nowElapsed();
+    seekEl.value = el;
+    clockEl.textContent = `${fmt(el)} / ${fmt(selectedPreset.lengthSec)}`;
+    if (el >= selectedPreset.lengthSec){ stopAll(); setStatus('Done • '+fmt(selectedPreset.lengthSec)); return; }
     rafId = requestAnimationFrame(tick);
   }
 
-  // iOS tips: make sure ringer is on & volume up
-  startBtn.addEventListener('click', async ()=>{
-    try { if (ctx && ctx.state==='suspended') await ctx.resume(); } catch(e){}
-    start();
-  });
-  stopBtn.addEventListener('click', stopAll);
-  masterVol.addEventListener('input', ()=>{ if(master) master.gain.value = parseFloat(masterVol.value||"0.9"); });
+  // ======= Recording (real‑time) =======
+  function startRecord(){
+    if (!ctx) return setStatus('Start playback first.', false);
+    if (!('MediaRecorder' in window)) return setStatus('Recorder not supported here.', false);
+    // Route audio to MediaRecorder
+    const dest = ctx.createMediaStreamDestination();
+    master.disconnect(); master.connect(dest); master.connect(ctx.destination);
+    mediaRecorder = new MediaRecorder(dest.stream);
+    recordedChunks=[]; mediaRecorder.ondataavailable = e => { if (e.data.size>0) recordedChunks.push(e.data); };
+    mediaRecorder.onstop = ()=>{
+      const mime = mediaRecorder.mimeType || 'audio/webm';
+      const blob = new Blob(recordedChunks, {type:mime});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href=url; a.download='maestro-recording.webm';
+      a.click(); URL.revokeObjectURL(url);
+      dlInfo.textContent = `Saved recording (${mime}).`;
+    };
+    mediaRecorder.start();
+    saveBtn.disabled=false; setStatus('Recording…');
+  }
+  function stopRecord(){
+    if (mediaRecorder && mediaRecorder.state!=='inactive'){ mediaRecorder.stop(); }
+    saveBtn.disabled=true;
+  }
+
+  // ======= Offline Render (fast WAV, desktop‑friendly) =======
+  async function quickRender(){
+    dlInfo.textContent = 'Rendering… (WAV)';
+    try{
+      const sr = 44100;
+      const len = selectedPreset.lengthSec * sr;
+      const off = new OfflineAudioContext(1, len, sr);
+      // build graph in offline context
+      const master = off.createGain(); master.gain.value=parseFloat(masterVol.value||"0.9"); master.connect(off.destination);
+
+      function makeSquareShaper(offctx){
+        const sh = offctx.createWaveShaper();
+        const curve = new Float32Array(256);
+        for (let i=0;i<256;i++){ const x=(i/255)*2-1; curve[i]=(x>=0?1:-1); }
+        sh.curve=curve; sh.oversample='4x'; return sh;
+      }
+      function makeIsoGate(pStart,pEnd,t0,dur){
+        const lfo = off.createOscillator();
+        const shaper = makeSquareShaper(off);
+        const g = off.createGain(); const bias = off.createConstantSource();
+        lfo.type='sine'; lfo.connect(shaper); const lfoGain=off.createGain(); shaper.connect(lfoGain);
+        lfoGain.gain.value=0.5; bias.offset.value=0.5; lfoGain.connect(g.gain); bias.connect(g.gain);
+        lfo.frequency.setValueAtTime(pStart, t0); lfo.frequency.linearRampToValueAtTime(pEnd, t0+dur);
+        lfo.start(t0); bias.start(t0); return {node:g};
+      }
+
+      selectedPreset.stages.forEach(([s,dur,freqs,p0,p1,vols])=>{
+        const gate = makeIsoGate(p0,p1,s,dur).node;
+        const stageMaster = off.createGain(); gate.connect(stageMaster).connect(master);
+        freqs.forEach((f,i)=>{
+          const osc = off.createOscillator(); const g=off.createGain();
+          osc.type='sine'; osc.frequency.setValueAtTime(f, s);
+          g.gain.setValueAtTime((vols && vols[i]!=null)?vols[i]:0.5, s);
+          osc.connect(g).connect(gate); osc.start(s); osc.stop(s+dur+0.02);
+        });
+        // fade last 15s if final stage covers end
+        const T=selectedPreset.lengthSec;
+        if (s+dur>=T && s<=T-15){ const fade=stageMaster.gain; fade.linearRampToValueAtTime(fade.value, T-15); fade.linearRampToValueAtTime(0.0001, T); }
+      });
+
+      const buf = await off.startRendering();
+      // encode WAV
+      const wav = bufferToWav(buf);
+      const url = URL.createObjectURL(new Blob([wav], {type:'audio/wav'}));
+      const a = document.createElement('a'); a.href=url; a.download='maestro-render.wav'; a.click();
+      URL.revokeObjectURL(url);
+      dlInfo.textContent = 'Saved WAV via quick render.';
+    }catch(e){
+      dlInfo.textContent = 'Offline render failed here. Use Live Record instead.';
+      console.error(e);
+    }
+  }
+
+  // WAV encoder
+  function bufferToWav(buffer){
+    const numOfChan = buffer.numberOfChannels;
+    const btw = (view, offset, string) => { for (let i=0;i<string.length;i++) view.setUint8(offset+i, string.charCodeAt(i)); };
+    const sampleRate = buffer.sampleRate;
+    const length = buffer.length * numOfChan * 2 + 44;
+    const result = new ArrayBuffer(length);
+    const view = new DataView(result);
+    btw(view, 0, 'RIFF'); view.setUint32(4, 36 + buffer.length * numOfChan * 2, true);
+    btw(view, 8, 'WAVE'); btw(view, 12, 'fmt '); view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true); view.setUint16(22, numOfChan, true);
+    view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * numOfChan * 2, true);
+    view.setUint16(32, numOfChan * 2, true); view.setUint16(34, 16, true); btw(view, 36, 'data');
+    view.setUint32(40, buffer.length * numOfChan * 2, true);
+    // interleave + write
+    const channels = []; for (let i=0;i<numOfChan;i++) channels.push(buffer.getChannelData(i));
+    let offset = 44;
+    for (let i=0;i<buffer.length;i++){
+      for (let ch=0; ch<numOfChan; ch++){
+        let s = Math.max(-1, Math.min(1, channels[ch][i]));
+        view.setInt16(offset, s<0 ? s*0x8000 : s*0x7FFF, true); offset += 2;
+      }
+    }
+    return result;
+  }
+
+  // ======= UI Events =======
+  startBtn.onclick = async ()=>{
+    try{ if (!ctx) ctx = new (window.AudioContext||window.webkitAudioContext)({latencyHint:'interactive'});
+      if (ctx.state==='suspended') await ctx.resume();
+    }catch(e){ setStatus('Audio init failed: '+e, false); return; }
+    startAt(parseInt(seekEl.value,10) || 0);
+  };
+  stopBtn.onclick = stopAll;
+  pauseBtn.onclick = pause;
+  resumeBtn.onclick = resume;
+
+  seekEl.oninput = ()=>{ seekHint.textContent = 'Cue to '+fmt(parseInt(seekEl.value,10)); };
+  seekEl.onchange = ()=>{ if (running){ startAt(parseInt(seekEl.value,10)); } };
+
+  masterVol.oninput = ()=>{ if (master) master.gain.value=parseFloat(masterVol.value||"0.9"); };
+
+  recordBtn.onclick = startRecord;
+  saveBtn.onclick   = stopRecord;
+  offlineBtn.onclick= quickRender;
+
+  // Enable/disable record controls based on support
+  if (!('MediaRecorder' in window)){ recordBtn.disabled=true; saveBtn.disabled=true; dlInfo.textContent='Recorder not supported here; use Quick Render on desktop.'; }
 
 })();
 </script>
