@@ -23,6 +23,7 @@
   .ok{background:#11321f;color:#c7f9cc}.bad{background:#3a1313;color:#fca5a5}
 </style>
 </head>
+  <audio id="bgPlayer" preload="auto" playsinline style="display:none"></audio>
 <body>
 <div class="wrap">
   <h1>Maestro Player <span class="pill">Web Audio</span></h1>
@@ -533,20 +534,154 @@
     }
     return result;
   }
+// ======= Background-safe audio element playback =======
+async function renderPresetToWavBlob(preset, gain=0.9){
+  const sr = 44100;
+  const len = preset.lengthSec * sr;
+  const off = new OfflineAudioContext(1, len, sr);
+
+  const master = off.createGain(); master.gain.value = parseFloat(gain||"0.9"); master.connect(off.destination);
+
+  function makeSquareShaper(offctx){
+    const sh = offctx.createWaveShaper();
+    const curve = new Float32Array(256);
+    for (let i=0;i<256;i++){ const x=(i/255)*2-1; curve[i]=(x>=0?1:-1); }
+    sh.curve = curve; sh.oversample = '4x'; return sh;
+  }
+  function makeIsoGate(pStart,pEnd,t0,dur){
+    const lfo = off.createOscillator();
+    const shaper = makeSquareShaper(off);
+    const g = off.createGain(); const bias = off.createConstantSource();
+    lfo.type='sine'; lfo.connect(shaper); const lfoGain=off.createGain(); shaper.connect(lfoGain);
+    lfoGain.gain.value=0.5; bias.offset.value=0.5; lfoGain.connect(g.gain); bias.connect(g.gain);
+    lfo.frequency.setValueAtTime(pStart, t0); lfo.frequency.linearRampToValueAtTime(pEnd, t0+dur);
+    lfo.start(t0); bias.start(t0); return {node:g};
+  }
+
+  preset.stages.forEach(([s,dur,freqs,p0,p1,vols])=>{
+    const gate = makeIsoGate(p0,p1,s,dur).node;
+    const stageMaster = off.createGain(); gate.connect(stageMaster).connect(master);
+    freqs.forEach((f,i)=>{
+      const osc = off.createOscillator(); const g=off.createGain();
+      osc.type='sine'; osc.frequency.setValueAtTime(f, s);
+      g.gain.setValueAtTime((vols && vols[i]!=null)?vols[i]:0.5, s);
+      osc.connect(g).connect(gate); osc.start(s); osc.stop(s+dur+0.02);
+    });
+    const T=preset.lengthSec;
+    if (s+dur>=T && s<=T-15){
+      const fade = stageMaster.gain;
+      fade.linearRampToValueAtTime(fade.value, T-15);
+      fade.linearRampToValueAtTime(0.0001, T);
+    }
+  });
+
+  const buf = await off.startRendering();
+  // WAV encode (reuses your encoder)
+  const wav = bufferToWav(buf);
+  return new Blob([wav], {type:'audio/wav'});
+}
+
+let usingBg = false;
+let bgURL = null;
+const bgAudio = document.getElementById('bgPlayer');
+
+async function playPresetAsAudioElement(preset, loop=true){
+  setStatus('Rendering…');
+  // build WAV blob of the whole preset (simple & reliable), then play
+  const blob = await renderPresetToWavBlob(preset, masterVol.value);
+  if (bgURL) URL.revokeObjectURL(bgURL);
+  bgURL = URL.createObjectURL(blob);
+
+  bgAudio.src = bgURL;
+  bgAudio.loop = loop;
+  usingBg = true;
+
+  // wire lock‑screen controls
+  if ('mediaSession' in navigator){
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: preset.name, artist: 'Maestro Lab', album: 'Logan Sessions'
+    });
+    navigator.mediaSession.setActionHandler('play', ()=> bgAudio.play());
+    navigator.mediaSession.setActionHandler('pause', ()=> bgAudio.pause());
+    navigator.mediaSession.setActionHandler('seekto', e => { if (typeof e.seekTime==='number') bgAudio.currentTime = e.seekTime; });
+    navigator.mediaSession.playbackState = 'playing';
+  }
+
+  // seek to slider pos (after metadata loads)
+  const target = parseInt(seekEl.value||'0',10);
+  await bgAudio.play().catch(()=>{});
+  if (!isNaN(target) && target>0) {
+    const setT = ()=>{ bgAudio.currentTime = Math.min(target, selectedPreset.lengthSec); bgAudio.removeEventListener('loadedmetadata', setT); };
+    if (isFinite(bgAudio.duration)) setT(); else bgAudio.addEventListener('loadedmetadata', setT);
+  }
+
+  // UI state
+  startBtn.disabled = true; stopBtn.disabled = false; pauseBtn.disabled = false; resumeBtn.disabled = true;
+  recordBtn.disabled = true; saveBtn.disabled = true; // recording is for live WebAudio path
+  setStatus('Playing in background ✓', true);
+
+  // clock + seek sync
+  const onTime = ()=>{
+    seekEl.value = Math.min(selectedPreset.lengthSec, Math.floor(bgAudio.currentTime));
+    clockEl.textContent = `${fmt(seekEl.value)} / ${fmt(selectedPreset.lengthSec)}`;
+  };
+  bgAudio.addEventListener('timeupdate', onTime);
+  bgAudio.addEventListener('ended', ()=>{ setStatus('Done • '+fmt(selectedPreset.lengthSec)); });
+}
+
+function pauseBg(){
+  if (!usingBg) return;
+  bgAudio.pause();
+  setStatus('Paused');
+  pauseBtn.disabled = true; resumeBtn.disabled = false;
+}
+async function resumeBg(){
+  if (!usingBg) return;
+  await bgAudio.play().catch(()=>{});
+  setStatus('Playing…');
+  pauseBtn.disabled = false; resumeBtn.disabled = true;
+}
+function stopBg(){
+  if (!usingBg) return;
+  bgAudio.pause();
+  bgAudio.currentTime = 0;
+  if (bgURL) { URL.revokeObjectURL(bgURL); bgURL = null; }
+  usingBg = false;
+  startBtn.disabled=false; stopBtn.disabled=true; pauseBtn.disabled=true; resumeBtn.disabled=true;
+  seekEl.value=0; clockEl.textContent=`00:00 / ${fmt(selectedPreset.lengthSec)}`;
+  setStatus('Stopped.');
+}
+
+// Keep audio alive when unlocking screen
+document.addEventListener('visibilitychange', ()=>{
+  if (document.visibilityState === 'visible' && usingBg && bgAudio.paused === false){
+    bgAudio.play().catch(()=>{});
+  }
+});
 
   // ======= UI Events =======
-  startBtn.onclick = async ()=>{
-    try{ if (!ctx) ctx = new (window.AudioContext||window.webkitAudioContext)({latencyHint:'interactive'});
-      if (ctx.state==='suspended') await ctx.resume();
-    }catch(e){ setStatus('Audio init failed: '+e, false); return; }
-    startAt(parseInt(seekEl.value,10) || 0);
-  };
-  stopBtn.onclick = stopAll;
-  pauseBtn.onclick = pause;
-  resumeBtn.onclick = resume;
+// Prefer background-safe audio element on all devices (works on desktop too)
+startBtn.onclick = async ()=>{
+  // set max to preset length & reset clock
+  seekEl.max = selectedPreset.lengthSec;
+  clockEl.textContent = `00:00 / ${fmt(selectedPreset.lengthSec)}`;
+  await playPresetAsAudioElement(selectedPreset, true);
+};
+stopBtn.onclick   = ()=> usingBg ? stopBg()   : stopAll();
+pauseBtn.onclick  = ()=> usingBg ? pauseBg()  : pause();
+resumeBtn.onclick = ()=> usingBg ? resumeBg() : resume();
+
 
   seekEl.oninput = ()=>{ seekHint.textContent = 'Cue to '+fmt(parseInt(seekEl.value,10)); };
-  seekEl.onchange = ()=>{ if (running){ startAt(parseInt(seekEl.value,10)); } };
+ seekEl.onchange = ()=>{
+  const t = parseInt(seekEl.value,10) || 0;
+  if (usingBg){
+    bgAudio.currentTime = Math.min(t, selectedPreset.lengthSec);
+  } else if (running){
+    startAt(t); // legacy live WebAudio path
+  }
+};
+
 
   masterVol.oninput = ()=>{ if (master) master.gain.value=parseFloat(masterVol.value||"0.9"); };
 
