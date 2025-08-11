@@ -658,15 +658,200 @@ document.addEventListener('visibilitychange', ()=>{
     bgAudio.play().catch(()=>{});
   }
 });
+const IS_MOBILE = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+const CHUNK_SEC = 900; // 15 min chunks (use 600 for 10 min if needed)
+let chunkQueue = [];   // [{idx, url, blob}]
+let currentChunk = 0;
+let prefetching = false;
+
+async function renderPresetChunkToWavBlob(preset, chunkIdx, chunkSec = CHUNK_SEC, gain=0.9){
+  const sr = 22050; // lower SR for mobile memory relief (sounds fine for monaural)
+  const t0 = chunkIdx * chunkSec;
+  const t1 = Math.min(preset.lengthSec, t0 + chunkSec);
+  const dur = Math.max(0, t1 - t0);
+  if (dur <= 0) return null;
+
+  const off = new OfflineAudioContext(1, dur * sr, sr);
+  const master = off.createGain(); master.gain.value = parseFloat(gain||"0.9"); master.connect(off.destination);
+
+  function makeSquareShaper(ctx){
+    const sh = ctx.createWaveShaper();
+    const curve = new Float32Array(256);
+    for (let i=0;i<256;i++){ const x=(i/255)*2-1; curve[i]=(x>=0?1:-1); }
+    sh.curve=curve; sh.oversample='4x'; return sh;
+  }
+  function makeIsoGate(ctx, pStart,pEnd,t0Local,dLocal){
+    const lfo = ctx.createOscillator();
+    const shaper = makeSquareShaper(ctx);
+    const lfoGain = ctx.createGain();
+    const bias = ctx.createConstantSource();
+    const gate = ctx.createGain();
+
+    lfo.type='sine'; lfo.connect(shaper); shaper.connect(lfoGain);
+    lfoGain.gain.value=0.5; bias.offset.value=0.5;
+    lfoGain.connect(gate.gain); bias.connect(gate.gain);
+    lfo.frequency.setValueAtTime(pStart, t0Local);
+    lfo.frequency.linearRampToValueAtTime(pEnd, t0Local + dLocal);
+    lfo.start(t0Local); bias.start(t0Local);
+    return {gate, stop:(t)=>{ try{lfo.stop(t);}catch(_){} try{bias.stop(t);}catch(_){}}};
+  }
+
+  // schedule only the portion of each stage that overlaps [t0,t1)
+  const T = preset.lengthSec;
+  preset.stages.forEach(([s,d,freqs,p0,p1,vols])=>{
+    const S = s, E = s + d;
+    if (E <= t0 || S >= t1) return; // no overlap
+    const segStart = Math.max(S, t0);
+    const segEnd   = Math.min(E, t1);
+    const segDur   = segEnd - segStart;
+    const localStart = segStart - t0;
+
+    // interpolate pulse at seg boundaries
+    const rel0 = (segStart - S) / d;
+    const rel1 = (segEnd   - S) / d;
+    const pStart = p0 + (p1 - p0) * rel0;
+    const pEnd   = p0 + (p1 - p0) * rel1;
+
+    const {gate} = makeIsoGate(off, pStart, pEnd, localStart, segDur);
+    const stageMaster = off.createGain(); gate.connect(stageMaster).connect(master);
+
+    freqs.forEach((f,i)=>{
+      const osc = off.createOscillator();
+      const g = off.createGain();
+      osc.type='sine';
+      osc.frequency.setValueAtTime(f, localStart);
+      const vol = (vols && vols[i]!=null)?vols[i]:0.5;
+      g.gain.setValueAtTime(vol, localStart);
+      osc.connect(g).connect(gate);
+      osc.start(localStart);
+      osc.stop(localStart + segDur + 0.02);
+    });
+
+    // fade the TRUE end of the whole preset only if final chunk reaches T
+    if (segEnd >= T && S <= T-15){
+      stageMaster.gain.linearRampToValueAtTime(stageMaster.gain.value, T - segStart - 15);
+      stageMaster.gain.linearRampToValueAtTime(0.0001, localStart + segDur);
+    }
+  });
+
+  const buf = await off.startRendering();
+  const wav = bufferToWav(buf);
+  return new Blob([wav], {type:'audio/wav'});
+}
+
+async function ensureChunkReady(preset, idx){
+  if (chunkQueue.find(c => c.idx===idx)) return; // already there
+  if (idx*CHUNK_SEC >= preset.lengthSec) return;
+
+  prefetching = true;
+  setStatus(`Rendering chunk ${idx+1}…`);
+  const blob = await renderPresetChunkToWavBlob(preset, idx, CHUNK_SEC, masterVol.value);
+  if (!blob){ prefetching=false; return; }
+  const url = URL.createObjectURL(blob);
+  chunkQueue.push({idx, url, blob});
+  // keep only two in memory: current and next
+  chunkQueue = chunkQueue
+    .sort((a,b)=>a.idx-b.idx)
+    .filter(c => c.idx >= currentChunk && c.idx <= currentChunk+1);
+  prefetching = false;
+}
+
+function getChunkUrl(idx){
+  const hit = chunkQueue.find(c => c.idx===idx);
+  return hit ? hit.url : null;
+}
+
+async function playPresetChunked(preset){
+  usingBg = true;
+  currentChunk = Math.floor((parseInt(seekEl.value||'0',10))/CHUNK_SEC);
+  chunkQueue = [];
+
+  // render current and next
+  await ensureChunkReady(preset, currentChunk);
+  ensureChunkReady(preset, currentChunk+1); // fire-and-forget
+
+  const loadAndPlay = async (idx, startAtSec=0)=>{
+    const url = getChunkUrl(idx);
+    if (!url){ await ensureChunkReady(preset, idx); }
+    const useUrl = getChunkUrl(idx);
+    if (!useUrl){ setStatus('Chunk render failed.', false); return; }
+
+    const audio = document.getElementById('bgPlayer');
+    audio.src = useUrl;
+    audio.loop = false;
+
+    // Media Session (lock‑screen)
+    if ('mediaSession' in navigator){
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: `${preset.name} — part ${idx+1}`,
+        artist: 'Maestro Lab',
+        album: 'Logan Sessions'
+      });
+      navigator.mediaSession.setActionHandler('play', ()=> audio.play());
+      navigator.mediaSession.setActionHandler('pause', ()=> audio.pause());
+      navigator.mediaSession.setActionHandler('seekto', e => {
+        if (typeof e.seekTime==='number'){
+          const globalT = e.seekTime;
+          const newIdx = Math.floor(globalT/CHUNK_SEC);
+          const within = globalT - newIdx*CHUNK_SEC;
+          currentChunk = newIdx;
+          loadAndPlay(newIdx, within);
+        }
+      });
+    }
+
+    await audio.play().catch(()=>{});
+    // seek within this chunk if needed
+    audio.currentTime = Math.min(startAtSec, CHUNK_SEC);
+
+    // clock
+    const onTime = ()=>{
+      const globalTime = currentChunk*CHUNK_SEC + Math.floor(audio.currentTime);
+      seekEl.value = Math.min(preset.lengthSec, globalTime);
+      clockEl.textContent = `${fmt(globalTime)} / ${fmt(preset.lengthSec)}`;
+    };
+    audio.onended = async ()=>{
+      // free past chunk
+      const past = chunkQueue.find(c=>c.idx===currentChunk);
+      if (past){ URL.revokeObjectURL(past.url); }
+      currentChunk++;
+      if (currentChunk*CHUNK_SEC >= preset.lengthSec){
+        setStatus('Done • '+fmt(preset.lengthSec));
+        stopBg();
+        return;
+      }
+      // prefetch next
+      ensureChunkReady(preset, currentChunk+1);
+      // play next (startAt 0)
+      loadAndPlay(currentChunk, 0);
+    };
+    audio.ontimeupdate = onTime;
+
+    // UI state
+    startBtn.disabled = true; stopBtn.disabled = false; pauseBtn.disabled = false; resumeBtn.disabled = true;
+    setStatus(`Playing (part ${idx+1}) ✓`, true);
+  };
+
+  // figure initial offset within the first chunk
+  const initialGlobal = parseInt(seekEl.value||'0',10);
+  const within = initialGlobal - currentChunk*CHUNK_SEC;
+  await loadAndPlay(currentChunk, Math.max(0, within));
+}
 
   // ======= UI Events =======
 // Prefer background-safe audio element on all devices (works on desktop too)
 startBtn.onclick = async ()=>{
-  // set max to preset length & reset clock
   seekEl.max = selectedPreset.lengthSec;
   clockEl.textContent = `00:00 / ${fmt(selectedPreset.lengthSec)}`;
-  await playPresetAsAudioElement(selectedPreset, true);
+
+  const isLong = selectedPreset.lengthSec > CHUNK_SEC; // longer than 15 min
+  if (IS_MOBILE && isLong){
+    await playPresetChunked(selectedPreset);   // <-- chunked path (mobile-friendly)
+  } else {
+    await playPresetAsAudioElement(selectedPreset, true); // <-- whole-file path
+  }
 };
+
 stopBtn.onclick   = ()=> usingBg ? stopBg()   : stopAll();
 pauseBtn.onclick  = ()=> usingBg ? pauseBg()  : pause();
 resumeBtn.onclick = ()=> usingBg ? resumeBg() : resume();
