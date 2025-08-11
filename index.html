@@ -659,7 +659,7 @@ document.addEventListener('visibilitychange', ()=>{
   }
 });
 const IS_MOBILE = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-const CHUNK_SEC = 900; // 15 min chunks (use 600 for 10 min if needed)
+const CHUNK_SEC = 600; // 15 min chunks (use 600 for 10 min if needed)
 let chunkQueue = [];   // [{idx, url, blob}]
 let currentChunk = 0;
 let prefetching = false;
